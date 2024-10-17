@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
@@ -14,7 +15,7 @@
 
 int alarmEnabled = FALSE;
 int alarmCount = 0;
-unsigned char frameCounter = 0x0;
+
 
 typedef enum{
     START,
@@ -31,16 +32,6 @@ typedef struct{
     char control;
     char bcc;
 } Message;
-
-typedef struct{
-    unsigned char flag;
-    unsigned char address;
-    unsigned char control;
-    unsigned char* data;
-    unsigned char bcc1;
-    unsigned char bcc2;
-
-} IFrame;
 
 
 void alarmHandler(int signal){
@@ -140,7 +131,7 @@ int llopen(LinkLayer connectionParameters)
             }
         }
         if(llState == STOP){
-            printf("RECEIVED UA FRAME\n");
+            return 0;
         }
     }
     // Handle logic for receiving side
@@ -214,17 +205,81 @@ int llopen(LinkLayer connectionParameters)
 ////////////////////////////////////////////////
 int llwrite(const unsigned char *buf, int bufSize)
 {
-    // TODO
-    IFrame iframe;
-    iframe.flag = 0x7E;
-    iframe.address = 0x03;
-    iframe.control = frameCounter;
-    iframe.bcc1 = iframe.address ^ iframe.control;
-    iframe.data = malloc(bufSize);
+    if(buf == NULL){
+        printf("Payload Pointer is NULL!\n");
+        return 1;
+    }
 
+    unsigned char flag = 0x7E;
+    unsigned char address = 0x03;
+    unsigned char control = frameCounter;
+    unsigned char bcc1 = address ^ control;
+    unsigned char bcc2 = 0;
+
+    // allocate memory for worst case scenario
+    unsigned char* stuffedBuf = (unsigned char*) malloc(sizeof(unsigned char) * bufSize * 2);
+    if(!stuffedBuf){
+        printf("Couldn't allocate memory for stuffedBuffer!\n");
+        return 1;
+    } 
+
+
+    // Get bcc2 from singular bytes from payload and generate stuffedPayload
+    int bytesInserted = 0;
+    for(int i = 0; i < bufSize; i++){
+        bcc2 ^= buf[i];
+        if(buf[i] == 0x7E || buf[i] == 0x7d){
+            stuffedBuf[bytesInserted++] = 0x7d;
+            stuffedBuf[bytesInserted++] = buf[i] ^ 0x20;
+        }else{
+            stuffedBuf[bytesInserted++] = buf[i];
+        }
+    }
+
+    // deallocate not used bytes
+    unsigned char* temp = (unsigned char*) realloc(stuffedBuf, sizeof(unsigned char) * bytesInserted);
+    if(!temp){
+        free(temp);
+        free(stuffedBuf);
+        printf("Couldn't reallocate memory!\n");
+        return 1;
+    }
+
+
+    // We got specific size of payload with byte stuffing!!!!!!
+    stuffedBuf = temp;
+
+    /* DEBUG STUFFED BYTES
     
-    // when RR is received, module-2 the framCounter
-    frameCounter ^= 0x1;
+    for(int i = 0; i < bytesInserted; i++){
+        printf("%x\\", stuffedBuf[i]);
+    }
+    
+    */
+
+    // Information frame is ready for shipment
+    int messageSize = 5 + bytesInserted;
+    unsigned char* message = (unsigned char*) malloc(messageSize);
+
+    message[0] = flag;
+    message[1] = address;
+    message[2] = control;
+    message[3] = bcc1;
+    memcpy(&message[4], stuffedBuf, bytesInserted);
+    message[messageSize - 2] = bcc2;
+    message[messageSize - 1] = flag;
+
+    // Send message
+    int ret = writeBytesSerialPort(message, messageSize);
+    if(ret == -1){
+        printf("Couldn't write frame!\n");
+        return 1;
+    }
+
+    // retransmission logic
+
+
+
     return 0;
 }
 
@@ -233,7 +288,8 @@ int llwrite(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 int llread(unsigned char *packet)
 {
-    // TODO
+    // byte destuffing
+    
 
     return 0;
 }

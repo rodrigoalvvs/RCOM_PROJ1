@@ -10,7 +10,7 @@
 void applicationLayer(const char *serialPort, const char *role, int baudRate,
                       int nTries, int timeout, const char *filename)
 {
-    // TODO
+    
     LinkLayer linkLayerStruct;
 
     strncpy(linkLayerStruct.serialPort, serialPort, sizeof(linkLayerStruct.serialPort) - 1);
@@ -22,8 +22,21 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
     linkLayerStruct.timeout = timeout;
 
     llopen(linkLayerStruct);
+    
 
+    /* BYTE STUFFING TEST
+    
+    
+    unsigned char* data = (unsigned char*) malloc(10);
 
+    for(int i = 0; i < 10; i++){
+        data[i] = 0x7d;
+    }
+    llwrite(data, 10);
+    */
+
+    /*
+    
     if(strcmp(role, "tx") == 0){
         // transmitter
         // try to open file
@@ -66,5 +79,6 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         // receive file and save it
 
     }
+    */
 }
 
