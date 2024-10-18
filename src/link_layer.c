@@ -13,8 +13,11 @@
 #define FALSE 0
 #define TRUE 1
 
-int alarmEnabled = FALSE;
+int alarmTimeout = 0;
 int alarmCount = 0;
+int alarmEnabled = FALSE;
+
+unsigned char frameNr = 0;
 
 
 typedef enum{
@@ -22,7 +25,10 @@ typedef enum{
     FLAG_RCV,
     A_RCV,
     C_RCV,
-    BCC_OK,
+    BCC1_OK,
+    BCC2_OK,
+    READING_DATA,
+    ESCAPED_DATA,
     STOP
 } LinkLayerState;
 
@@ -55,7 +61,7 @@ int llopen(LinkLayer connectionParameters)
     // assign alarHandler
     (void) signal(SIGALRM, alarmHandler);
 
-    int timeout = connectionParameters.timeout;
+    alarmTimeout = connectionParameters.timeout;
     int messagesToSend = connectionParameters.nRetransmissions;
 
 
@@ -75,7 +81,7 @@ int llopen(LinkLayer connectionParameters)
         while((alarmCount - 1) < messagesToSend && llState != STOP ){
 
             if(alarmEnabled == FALSE){
-                alarm(timeout);
+                alarm(alarmTimeout);
                 // logic to send SET FRAME
                 writeBytesSerialPort(set_frame, 5);
                 alarmEnabled = TRUE;
@@ -118,11 +124,11 @@ int llopen(LinkLayer connectionParameters)
                 // C_RCV state that should receive a valid BCC (A ^ C)
                 case C_RCV:
                     if(byteRCV == 0x7E){llState = FLAG_RCV;break;}
-                    else if(byteRCV == (message.control ^ message.address)){llState = BCC_OK;break;}
+                    else if(byteRCV == (message.control ^ message.address)){llState = BCC1_OK;break;}
                     else{llState = START;}
                     break;
                 // BCC_OK state that should receive a valid flag (0x7E)
-                case BCC_OK:
+                case BCC1_OK:
                     if(byteRCV == 0x7E){llState = STOP;break;}
                     else{llState = START;}
                     break;
@@ -176,11 +182,11 @@ int llopen(LinkLayer connectionParameters)
                 // C_RCV state that should receive a valid BCC (A ^ C)
                 case C_RCV:
                     if(byteRCV == 0x7E){llState = FLAG_RCV;break;}
-                    else if(byteRCV == (message.control ^ message.address)){llState = BCC_OK;break;}
+                    else if(byteRCV == (message.control ^ message.address)){llState = BCC1_OK;break;}
                     else{llState = START;}
                     break;
                 // BCC_OK state that should receive a valid flag (0x7E)
-                case BCC_OK:
+                case BCC1_OK:
                     if(byteRCV == 0x7E){llState = STOP;break;}
                     else{llState = START;}
                     break;
@@ -210,12 +216,6 @@ int llwrite(const unsigned char *buf, int bufSize)
         return 1;
     }
 
-    unsigned char flag = 0x7E;
-    unsigned char address = 0x03;
-    unsigned char control = frameCounter;
-    unsigned char bcc1 = address ^ control;
-    unsigned char bcc2 = 0;
-
     // allocate memory for worst case scenario
     unsigned char* stuffedBuf = (unsigned char*) malloc(sizeof(unsigned char) * bufSize * 2);
     if(!stuffedBuf){
@@ -223,9 +223,9 @@ int llwrite(const unsigned char *buf, int bufSize)
         return 1;
     } 
 
-
     // Get bcc2 from singular bytes from payload and generate stuffedPayload
     int bytesInserted = 0;
+    unsigned char bcc2 = 0;
     for(int i = 0; i < bufSize; i++){
         bcc2 ^= buf[i];
         if(buf[i] == 0x7E || buf[i] == 0x7d){
@@ -258,8 +258,14 @@ int llwrite(const unsigned char *buf, int bufSize)
     */
 
     // Information frame is ready for shipment
+    unsigned char flag = 0x7E;
+    unsigned char address = 0x03;
+    unsigned char control = frameNr;
+    unsigned char bcc1 = address ^ control;
+
     int messageSize = 5 + bytesInserted;
     unsigned char* message = (unsigned char*) malloc(messageSize);
+
 
     message[0] = flag;
     message[1] = address;
@@ -269,18 +275,95 @@ int llwrite(const unsigned char *buf, int bufSize)
     message[messageSize - 2] = bcc2;
     message[messageSize - 1] = flag;
 
-    // Send message
-    int ret = writeBytesSerialPort(message, messageSize);
-    if(ret == -1){
-        printf("Couldn't write frame!\n");
-        return 1;
-    }
 
     // retransmission logic
+    // assign alarHandler
+    (void) signal(SIGALRM, alarmHandler);
 
+    LinkLayerState llState;
+    llState = START;
 
+    while(alarmCount < 4 && llState != STOP){
+        if(alarmEnabled == FALSE){
+            alarm(alarmTimeout);
+            // logic to send message again
+            int ret = writeBytesSerialPort(message, messageSize);
+            if(ret == -1){
+                printf("Couldn't write frame!\n");
+            }
+            alarmEnabled = TRUE;
+        }
 
-    return 0;
+        unsigned char byteRCV;
+        int ret = readByteSerialPort(&byteRCV);
+
+        Message received;
+
+        if(ret != 1) continue;
+
+        switch (llState)
+        {
+        case START:
+            // Got flag
+            if(byteRCV == 0x7E){
+                llState = FLAG_RCV;
+                received.flag = 0x7E;
+            }
+            break;
+        // FLAG_RCV state that should receive a valid address : 0x03
+        case FLAG_RCV:
+            if(byteRCV == 0x7E){break;}
+            else if(byteRCV == 0x03){
+                llState = A_RCV;
+                received.address = 0x03;
+            }else{
+                llState = START;
+            }
+            break;
+        // A_RCV state that should receive a valid control byte : (RR0) -> 0xAA (RR1) -> 0xAB (REJ0) -> 0x54 (REJ1) -> 0x55
+        case A_RCV:
+            if(byteRCV == 0x7E){llState = FLAG_RCV; break;}
+            // If byte received was Received the correct frame then proceed
+            else if(byteRCV == (0xAA + frameNr)){
+                llState = C_RCV;
+                received.control = byteRCV;
+                break;
+            }
+            else if(byteRCV == (0x54 + frameNr)){
+                llState = START;
+                int ret = writeBytesSerialPort(message, messageSize);
+                if(ret == -1){
+                    printf("Couldn't write frame!\n");
+                }
+                alarmCount = 0;
+                alarmEnabled = TRUE;
+            }
+            else{llState = START;}
+            break;
+        // C_RCV state that should receive a valid BCC
+        case C_RCV:
+            if(byteRCV == 0x7E){llState = FLAG_RCV; break;}
+            else if(byteRCV == (received.control ^ received.address)){
+                llState = BCC1_OK;
+                break;
+            }else{
+                llState = START;
+            }
+            break;
+        case BCC1_OK:
+            if(byteRCV == 0x7E){llState = STOP; break;}
+            else{llState = START;}
+            break;
+        default:
+            break;
+        }
+
+    }
+    if(llState = STOP){
+        frameNr ^= 1;
+        return 0;
+    }
+    return 1;
 }
 
 ////////////////////////////////////////////////
