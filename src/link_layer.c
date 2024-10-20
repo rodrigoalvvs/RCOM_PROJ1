@@ -263,7 +263,6 @@ int llwrite(const unsigned char *buf, int bufSize)
         printf("Couldn't allocate memory for stuffed data!\n");
         return -1;
     }
-    printf("BCC2 is %x\n", bcc2);
 
     // Information frame is ready for shipment
     int messageSize = 6 + stuffedSize;
@@ -305,7 +304,7 @@ int llwrite(const unsigned char *buf, int bufSize)
         switch (llState)
         {
         case START:
-            printf("START->0x%x\n", byteRCV);
+            //printf("START->0x%x\n", byteRCV);
             memset(&received, 0, sizeof(Message));
             // Got flag
             if(byteRCV == FLAG){
@@ -315,7 +314,7 @@ int llwrite(const unsigned char *buf, int bufSize)
             break;
         // FLAG_RCV state that should receive a valid address : 0x03
         case FLAG_RCV:
-            printf("FLAG_RCV->0x%x\n", byteRCV);
+            //printf("FLAG_RCV->0x%x\n", byteRCV);
             if(byteRCV == FLAG){break;}
             else if(byteRCV == A_TX){
                 llState = A_RCV;
@@ -326,8 +325,8 @@ int llwrite(const unsigned char *buf, int bufSize)
             break;
         // A_RCV state that should receive a valid control byte : (RR0) -> 0xAA (RR1) -> 0xAB (REJ0) -> 0x54 (REJ1) -> 0x55
         case A_RCV:
-            printf("A_RCV->0x%x\n", byteRCV);
-            printf("FRAME NUMBER : %x\n", frameNr );
+            //printf("A_RCV->0x%x\n", byteRCV);
+            //printf("FRAME NUMBER : %x\n", frameNr );
             if(byteRCV == FLAG){llState = FLAG_RCV; break;}
             // received response
             else if(byteRCV == (C_RR0 + (frameNr ^ 0x1)) || byteRCV == (C_REJ0 + frameNr)){
@@ -340,7 +339,7 @@ int llwrite(const unsigned char *buf, int bufSize)
             break;
         // C_RCV state that should receive a valid BCC
         case C_RCV:
-            printf("C_RCV->0x%x\n", byteRCV);
+            //printf("C_RCV->0x%x\n", byteRCV);
             if(byteRCV == FLAG){llState = FLAG_RCV; break;}
             else if(byteRCV == BCC1(received.control, received.address)){
                 llState = BCC1_OK;
@@ -355,6 +354,7 @@ int llwrite(const unsigned char *buf, int bufSize)
                 if(received.control == (C_REJ0 + frameNr)){
                     llState = START;
                     writeBytesSerialPort(message, messageSize);
+                    printf("FRAME WAS REJECTED!\n");
                     break;
                 }
                 llState = STOP;
@@ -371,7 +371,7 @@ int llwrite(const unsigned char *buf, int bufSize)
         frameNr ^= 1;
         return 0;
     }
-    return 1;
+    return -1;
 }
 
 ////////////////////////////////////////////////
@@ -397,7 +397,7 @@ int llread(unsigned char *packet)
         {
         // this should receive a valid flag
         case START:
-            printf("START->0x%x\n", byteRCV);
+            //printf("START->0x%x\n", byteRCV);
             if(byteRCV == FLAG){
                 llState = FLAG_RCV;
                 message.flag = FLAG;
@@ -406,7 +406,7 @@ int llread(unsigned char *packet)
         // this should receive a valid address 0x03 (from transmitter)
         case FLAG_RCV:
             idx = 0;
-            printf("FLAG_RCV->0x%x\n", byteRCV);
+            //printf("FLAG_RCV->0x%x\n", byteRCV);
             if(byteRCV == FLAG) break;
             else if(byteRCV == A_TX){
                 llState = A_RCV;
@@ -417,7 +417,7 @@ int llread(unsigned char *packet)
             break;
         // this should receive a valid control (0x03 if it is a set frame, 0 or 0x80 for a info frame)
         case A_RCV:
-            printf("A_RCV->0x%x\n", byteRCV);
+            //printf("A_RCV->0x%x\n", byteRCV);
             // received a set frame (llopen did not go through)
             if(byteRCV == C_SET){
                 llState = C_RCV;
@@ -436,7 +436,7 @@ int llread(unsigned char *packet)
         // this should receive a valid BCC1 
         // if it receives a valid BCC1 then proceeds to read data
         case C_RCV: 
-            printf("C_RCV->0x%x\n", byteRCV);
+            //printf("C_RCV->0x%x\n", byteRCV);
             if(byteRCV == BCC1(message.control, message.address)){
                 if(message.control == C_SET){llState = BCC1_OK; break;}
                 bcc2_input = 0;
@@ -463,12 +463,15 @@ int llread(unsigned char *packet)
             else if(byteRCV == FLAG){
                 packet[idx--] = 0;
                 if(bcc2_input == 0){
+
                     // acknowledge frame
+                    printf("Accpeting frame!\n");
                     sendSupervisionMessage(A_TX, C_RR0 + ((message.control >> 7) ^ 0x1));
                     frameNr = message.control ^ 0x1;
                     return idx;
                 }else{
                     // reject frame
+                    printf("Rejecting frame!\n");
                     sendSupervisionMessage(A_TX, C_REJ0 + (message.control >> 7));
                     memset(packet, 0, idx);
                     llState = START;

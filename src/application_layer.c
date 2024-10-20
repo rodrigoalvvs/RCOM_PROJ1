@@ -9,6 +9,9 @@
 #include <malloc.h>
 
 #define HEADER_SIZE 4
+#define CTRL_HEADER_SIZE 7
+#define CTRL_FILESIZE 0x0
+#define CTRL_FILENAME 0x01
 #define CTRL_START 0x01
 #define CTRL_DATA 0x02
 #define CTRL_END 0x03
@@ -57,30 +60,37 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         fseek(file, 0, SEEK_SET);
 
         // File is opened, control packet must be sent to start transmission
-        unsigned char ctrlBuf[5];
+        unsigned char filenameSize = strlen(filename);
+        unsigned char ctrlBuf[CTRL_HEADER_SIZE + filenameSize];
 
         ctrlBuf[0] = CTRL_START;
-        ctrlBuf[1] = 0x00;
+
+        ctrlBuf[1] = CTRL_FILESIZE;
         ctrlBuf[2] = 0x02;
         ctrlBuf[3] = nrBytes & 0xFF;
         ctrlBuf[4] = (nrBytes >> 8) & 0xFF;
 
-        
+        ctrlBuf[5] = CTRL_FILENAME;
+        ctrlBuf[6] = filenameSize;
+        memcpy(&ctrlBuf[7], filename, filenameSize);
+
         // write control word
-        llwrite(ctrlBuf, 5);
+        llwrite(ctrlBuf, CTRL_HEADER_SIZE + filenameSize);
         
-        unsigned int maxPayload = MAX_PAYLOAD_SIZE - 4;
-        unsigned char nrFrames = ((nrBytes / (maxPayload)) - 0.5);
+
+        unsigned int maxPayload = MAX_PAYLOAD_SIZE - HEADER_SIZE;
+        unsigned char nrFrames = (nrBytes / (maxPayload));
         unsigned char lastFrameSize = nrBytes % (maxPayload);
         
-        unsigned char frameBuff[MAX_PAYLOAD_SIZE];
+        unsigned char* frameBuff = (unsigned char*) malloc(MAX_PAYLOAD_SIZE);
 
+        printf("FILE SIZE: %d\n", nrBytes);
         printf("NR FRAMEs: %d\n", nrFrames);
         printf("LAST FRAME: %d\n" , lastFrameSize);
 
         for(int i = 0; i < nrFrames ; i++){
             
-            unsigned int bytesRead = fread(&frameBuff[4], 1, maxPayload, file);
+            unsigned int bytesRead = fread(frameBuff + HEADER_SIZE, 1, maxPayload, file);
             
             if(bytesRead != maxPayload){
                 
@@ -92,11 +102,17 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             frameBuff[1] = i;
             frameBuff[2] = (maxPayload >> 8) & 0xFF;
             frameBuff[3] = (maxPayload & 0xFF);
-            llwrite(frameBuff, MAX_PAYLOAD_SIZE);
-            printf("SENT %d frame\n", i);
+
+            int ret = llwrite(frameBuff, MAX_PAYLOAD_SIZE);
+            if(ret == -1){
+                perror("Couldn't send frame\n");
+                return;
+            }
         }
         if(lastFrameSize > 0){
-            unsigned bytesRead = fread(&frameBuff[4], 1, lastFrameSize, file);
+            printf("SEND LAST FRAME\n");
+
+            unsigned bytesRead = fread(&frameBuff[HEADER_SIZE], 1, lastFrameSize, file);
             if(bytesRead != lastFrameSize){
                 printf("Error reading frame %d\n", nrFrames);
             }
@@ -104,7 +120,13 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             frameBuff[1] = nrFrames;
             frameBuff[2] = (lastFrameSize >> 8) & 0xFF;
             frameBuff[3] = (lastFrameSize & 0xFF);
-            llwrite(frameBuff, lastFrameSize);
+
+            int ret = llwrite(frameBuff, lastFrameSize + HEADER_SIZE);
+            if(ret == -1){
+                perror("Couldn't send last frame\n");
+                return;
+            }
+            free(frameBuff);
         }
     
         fclose(file);
@@ -117,45 +139,66 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         // receiver
         // receive file and save it
         
-        unsigned int fileSize;
-        FILE* fp = fopen("penguin.gif", "w");
-        fclose(fp);
-
-        fp = fopen("penguin.gif", "ab");
-        if(fp == NULL){
-            perror("Error opening file");
-            return;
-        }
+        
+        int fileSize;
+        int idx = 0;
+        unsigned char* file;
+        char* filename;
+        unsigned char packet[MAX_PAYLOAD_SIZE + 1];
 
         while(TRUE){
-            unsigned char packet[MAX_PAYLOAD_SIZE];
             int bytes = llread(&packet[0]);
 
             if(bytes == -1){
                 llopen(linkLayerStruct);
                 continue;
             }
-
             if(packet[0] == CTRL_START){
                 // start packet
                 fileSize = packet[3] | (packet[4] << 8);
+
+                filename = (char*) malloc(packet[CTRL_HEADER_SIZE - 1]);
+                memcpy(filename, &packet[CTRL_HEADER_SIZE], packet[CTRL_HEADER_SIZE - 1]);
+
+                printf("FILENAME IS: %s\n", filename);
                 printf("RECEIVED STARTER PACKET!\n");
+                printf("FILE SIZE IS : %d\n", fileSize);    
+                file = (unsigned char*) malloc(fileSize);
                 continue;
             }
             else if(packet[0] == CTRL_DATA){
                 // data packet
-                fwrite(&packet[4], 1, bytes - HEADER_SIZE, fp);
-                continue;
+                memcpy(&file[idx], &packet[HEADER_SIZE], bytes - HEADER_SIZE);
+                idx += (bytes - HEADER_SIZE);
+                printf("RECEIVED %d bytes\n", bytes);
+                continue;;
             }
             else if(packet[0] == CTRL_END){
                 // end packet
                 printf("REACHED END!\n");
                 break;
             }
+            
 
         }
 
+        printf("IDX: %d\n", idx);
+
+        FILE* fp = fopen(filename, "w");
+        if (fp == NULL) {
+            perror("Error opening file");
+            return;
+        }
+
+        size_t written = fwrite(file, 1, idx, fp);
+
+        if(written != idx){
+            perror("Error writing to file");
+        }
         fclose(fp);
+        free(file);
+        free(filename);
     }
+
     
 }
