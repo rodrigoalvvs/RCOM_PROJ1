@@ -34,6 +34,7 @@
 
 #define BCC1(a,b) (a ^ b) // Get bcc result (just xor)
 
+#define FRAME_SIZE 5
 
 
 #endif

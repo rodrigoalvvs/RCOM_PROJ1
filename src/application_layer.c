@@ -7,8 +7,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <malloc.h>
+#include <inttypes.h>
 
-#define HEADER_SIZE 4
+#define HEADER_SIZE 8
 #define CTRL_HEADER_SIZE 7
 #define CTRL_FILESIZE 0x0
 #define CTRL_FILENAME 0x01
@@ -54,7 +55,9 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             printf("%s file does not exist!", filename);
             return ;
         } 
-        int nrBytes;
+
+        // Get file size
+        uint32_t nrBytes;
         fseek(file, 0, SEEK_END);
         nrBytes = ftell(file);
         fseek(file, 0, SEEK_SET);
@@ -66,25 +69,28 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         ctrlBuf[0] = CTRL_START;
 
         ctrlBuf[1] = CTRL_FILESIZE;
-        ctrlBuf[2] = 0x02;
-        ctrlBuf[3] = nrBytes & 0xFF;
-        ctrlBuf[4] = (nrBytes >> 8) & 0xFF;
+        ctrlBuf[2] = 4;
 
-        ctrlBuf[5] = CTRL_FILENAME;
-        ctrlBuf[6] = filenameSize;
-        memcpy(&ctrlBuf[7], filename, filenameSize);
+        ctrlBuf[3] = (nrBytes >> 24) & 0xFF;
+        ctrlBuf[4] = (nrBytes >> 16) & 0xFF;
+        ctrlBuf[5]  = (nrBytes >> 8) & 0xFF;
+        ctrlBuf[6] = nrBytes & 0xFF;
+
+        ctrlBuf[7] = CTRL_FILENAME;
+        ctrlBuf[CTRL_HEADER_SIZE] = filenameSize;
+        memcpy(&ctrlBuf[CTRL_HEADER_SIZE + 1], filename, filenameSize);
 
         // write control word
-        llwrite(ctrlBuf, CTRL_HEADER_SIZE + filenameSize);
-        
+        printf("Sending control frame!\n");
+        llwrite(ctrlBuf, CTRL_HEADER_SIZE + filenameSize + 1);
 
-        unsigned int maxPayload = MAX_PAYLOAD_SIZE - HEADER_SIZE;
-        unsigned char nrFrames = (nrBytes / (maxPayload));
-        unsigned char lastFrameSize = nrBytes % (maxPayload);
+        int maxPayload = MAX_PAYLOAD_SIZE - HEADER_SIZE;
+        uint16_t nrFrames = (nrBytes / (maxPayload));
+        uint8_t lastFrameSize = nrBytes % (maxPayload);
         
         unsigned char* frameBuff = (unsigned char*) malloc(MAX_PAYLOAD_SIZE);
 
-        printf("FILE SIZE: %d\n", nrBytes);
+        printf("FILE SIZE: %u\n", nrBytes);
         printf("NR FRAMEs: %d\n", nrFrames);
         printf("LAST FRAME: %d\n" , lastFrameSize);
 
@@ -93,7 +99,6 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             unsigned int bytesRead = fread(frameBuff + HEADER_SIZE, 1, maxPayload, file);
             
             if(bytesRead != maxPayload){
-                
                 printf("Error reading frame %d : %d\n", i, bytesRead);
                 return;
             }
@@ -135,12 +140,15 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         ctrlBuf[0] = CTRL_END;
         llwrite(ctrlBuf, 5);
 
+        // Start llclose
+        llclose(1);
+        printf("CLOSED!\n");
+
     }else{
         // receiver
         // receive file and save it
         
-        
-        int fileSize;
+        uint32_t fileSize;
         int idx = 0;
         unsigned char* file;
         char* filename;
@@ -155,14 +163,15 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             }
             if(packet[0] == CTRL_START){
                 // start packet
-                fileSize = packet[3] | (packet[4] << 8);
+                fileSize = (packet[3] << 24) | (packet[4] << 16) | (packet[5] << 8) | packet[6];
 
-                filename = (char*) malloc(packet[CTRL_HEADER_SIZE - 1]);
-                memcpy(filename, &packet[CTRL_HEADER_SIZE], packet[CTRL_HEADER_SIZE - 1]);
+
+                filename = (char*) malloc(packet[CTRL_HEADER_SIZE]);
+                memcpy(filename, &packet[CTRL_HEADER_SIZE + 1], packet[CTRL_HEADER_SIZE]);
 
                 printf("FILENAME IS: %s\n", filename);
                 printf("RECEIVED STARTER PACKET!\n");
-                printf("FILE SIZE IS : %d\n", fileSize);    
+                printf("FILE SIZE IS : %u\n", fileSize);    
                 file = (unsigned char*) malloc(fileSize);
                 continue;
             }
@@ -171,7 +180,7 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
                 memcpy(&file[idx], &packet[HEADER_SIZE], bytes - HEADER_SIZE);
                 idx += (bytes - HEADER_SIZE);
                 printf("RECEIVED %d bytes\n", bytes);
-                continue;;
+                continue;
             }
             else if(packet[0] == CTRL_END){
                 // end packet
@@ -198,6 +207,8 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
         fclose(fp);
         free(file);
         free(filename);
+        llclose(1);
+        printf("CLOSED!\n");
     }
 
     
