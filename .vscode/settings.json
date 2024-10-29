@@ -1,0 +1,13 @@
+{
+    "cSpell.enabled": false,
+    "files.associations": {
+        "*.embeddedhtml": "html",
+        "stdlib.h": "c",
+        "link_layer.h": "c",
+        "unistd.h": "c",
+        "inttypes.h": "c",
+        "malloc.h": "c",
+        "string.h": "c",
+        "stdio.h": "c"
+    }
+}
