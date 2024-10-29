@@ -55,6 +55,19 @@ void alarmHandler(int signal){
 }
 
 ////////////////////////////////////////////////
+// sendMessageWrapper
+////////////////////////////////////////////////
+
+int sendMessageWrapper(unsigned char* message, int messageSize){
+    
+    int ret = writeBytesSerialPort(message , messageSize);
+    if(ret != messageSize){
+        // handle different written != size
+        return -1;
+    }
+    return 0;
+}
+////////////////////////////////////////////////
 // sendSupervisionMessage
 ////////////////////////////////////////////////
 
@@ -65,8 +78,10 @@ int sendSupervisionMessage(unsigned char address, unsigned char control){
     s_frame[2] = control;  
     s_frame[3] = BCC1(s_frame[1], s_frame[2]);
     s_frame[4] = FLAG;
-    return writeBytesSerialPort(s_frame, 5);
+    return sendMessageWrapper(s_frame, 5);
 }
+
+
 
 ////////////////////////////////////////////////
 // stuffData
@@ -96,7 +111,7 @@ int stuffData(const unsigned char *buf, int bufSize, unsigned char** stuffedBuf)
     }
     
     // insert bcc2 in stuffedBuf
-    if(bcc2 == FLAG){
+    if(bcc2 == FLAG || bcc2 == ESC){
         // stuff bcc2
         stuffedBuffer[bytesInserted++] = ESC;
         stuffedBuffer[bytesInserted++] = bcc2 ^ 0x20;
@@ -134,17 +149,24 @@ int llopen(LinkLayer connectionParameters)
     alarmTimeout = connectionParameters.timeout;
     retransmissions = connectionParameters.nRetransmissions;
 
-
     LinkLayerState llState = START;
     Message message;
     curLL = connectionParameters;
     // Handle logic for transmitter side
+
+
     if(connectionParameters.role == LlTx){
-        // retransmission logic (send 3 + 1 messages)
-        while((alarmCount - 1) < retransmissions && llState != STOP){
+        sendSupervisionMessage(A_TX, C_SET);
+        nrFrames++;
+        
+        // retransmission logic (send 3 messages)
+        while(alarmCount <= retransmissions && llState != STOP){
             if(alarmEnabled == FALSE){
                 alarm(alarmTimeout);
-                sendSupervisionMessage(A_TX, C_SET);
+                if(alarmCount > 0) {
+                    sendSupervisionMessage(A_TX, C_SET);
+                    nrTimeouts++;
+                }
                 alarmEnabled = TRUE;
             }
 
@@ -257,6 +279,7 @@ int llopen(LinkLayer connectionParameters)
         }
         // transmitin UA
         int ret = sendSupervisionMessage(A_TX, C_UA);
+        nrFrames++;
         return ret;
     }
     return 0;
@@ -267,13 +290,7 @@ int llopen(LinkLayer connectionParameters)
 ////////////////////////////////////////////////
 int llwrite(const unsigned char *buf, int bufSize)
 {   
-    printf("SENDING frame %d\n", frameNr);
-    if(buf == NULL){
-        printf("Payload Pointer is NULL!\n");
-        return -1;
-    }
-    if(bufSize > MAX_PAYLOAD_SIZE){
-        printf("Payload exceeds max payload size (1000 bytes)\n");
+    if(buf == NULL || bufSize > MAX_PAYLOAD_SIZE){
         return -1;
     }
 
@@ -304,13 +321,19 @@ int llwrite(const unsigned char *buf, int bufSize)
     LinkLayerState llState = START;
     Message received;
     
+    // send first message
+    nrFrames++;
+    sendMessageWrapper(message, messageSize);
     while(alarmCount <= retransmissions){
         
         // enable alarm and send
         if(alarmEnabled == FALSE){
             alarm(alarmTimeout);
             // logic to send message again
-            writeBytesSerialPort(message, messageSize);
+            if(alarmCount > 0){
+                nrTimeouts++;
+                sendMessageWrapper(message, messageSize);
+            } 
             alarmEnabled = TRUE;
         }
 
@@ -322,7 +345,6 @@ int llwrite(const unsigned char *buf, int bufSize)
         switch (llState)
         {
         case START:
-            //printf("START->0x%x\n", byteRCV);
             memset(&received, 0, sizeof(Message));
             // Got flag
             if(byteRCV == FLAG){
@@ -332,7 +354,6 @@ int llwrite(const unsigned char *buf, int bufSize)
             break;
         // FLAG_RCV state that should receive a valid address : 0x03
         case FLAG_RCV:
-            //printf("FLAG_RCV->0x%x\n", byteRCV);
             if(byteRCV == FLAG){break;}
             else if(byteRCV == A_TX){
                 llState = A_RCV;
@@ -343,8 +364,6 @@ int llwrite(const unsigned char *buf, int bufSize)
             break;
         // A_RCV state that should receive a valid control byte : (RR0) -> 0xAA (RR1) -> 0xAB (REJ0) -> 0x54 (REJ1) -> 0x55
         case A_RCV:
-            //printf("A_RCV->0x%x\n", byteRCV);
-            //printf("FRAME NUMBER : %x\n", frameNr );
             if(byteRCV == FLAG){llState = FLAG_RCV; break;}
             // received response
             else if(byteRCV == (C_RR0 + (frameNr ^ 0x1)) || byteRCV == (C_REJ0 + frameNr)){
@@ -357,7 +376,6 @@ int llwrite(const unsigned char *buf, int bufSize)
             break;
         // C_RCV state that should receive a valid BCC
         case C_RCV:
-            //printf("C_RCV->0x%x\n", byteRCV);
             if(byteRCV == FLAG){llState = FLAG_RCV; break;}
             else if(byteRCV == BCC1(received.control, received.address)){
                 llState = BCC1_OK;
@@ -371,9 +389,10 @@ int llwrite(const unsigned char *buf, int bufSize)
                 // check if frame was rejected
                 if(received.control == (C_REJ0 + frameNr)){
                     llState = START;
+                    sendMessageWrapper(message, messageSize);
+                    nrRetransmissions++;
                     alarmEnabled = FALSE;
                     alarmCount = 0;
-                    printf("FRAME WAS REJECTED!\n");
                     break;
                 }
                 llState = STOP;
@@ -382,7 +401,6 @@ int llwrite(const unsigned char *buf, int bufSize)
             else{llState = START;}
             break;
         case STOP:
-            printf("FRAME GOT RR!\n");
             frameNr ^= 0x1;
             return bufSize;
         default:
@@ -393,6 +411,7 @@ int llwrite(const unsigned char *buf, int bufSize)
     return -1;
 }
 
+
 ////////////////////////////////////////////////
 // LLREAD
 ////////////////////////////////////////////////
@@ -402,10 +421,9 @@ int llread(unsigned char *packet)
     Message message;
     int bytesReceived = 0;
     unsigned char bcc2_input = 0x0;
-    printf("RECEIVING frame %d\n", frameNr);
+
     // receives a packet, that could be a SET frame(return to llopen) or a I frame containing data
     while(TRUE){
-
         unsigned char byteRCV;
         // receive bytes
         int ret = readByteSerialPort(&byteRCV);
@@ -415,7 +433,6 @@ int llread(unsigned char *packet)
         {
         // this should receive a valid flag
         case START:
-            //printf("START->0x%x\n", byteRCV);
             if(byteRCV == FLAG){
                 bytesReceived = 0;
                 memset(&message, 0, sizeof(Message));
@@ -425,7 +442,6 @@ int llread(unsigned char *packet)
             break;
         // this should receive a valid address 0x03 (from transmitter)
         case FLAG_RCV:
-            //printf("FLAG_RCV->0x%x\n", byteRCV);
             bytesReceived = 0;
             if(byteRCV == FLAG) break;
             else if(byteRCV == A_TX){
@@ -437,7 +453,6 @@ int llread(unsigned char *packet)
             break;
         // this should receive a valid control (0x03 if it is a set frame, 0 or 0x80 for a info frame)
         case A_RCV:
-            //printf("A_RCV->0x%x\n", byteRCV);
             // received a set frame (llopen did not go through)
             if(byteRCV == C_SET){
                 llState = C_RCV;
@@ -456,7 +471,6 @@ int llread(unsigned char *packet)
         // this should receive a valid BCC1 
         // if it receives a valid BCC1 then proceeds to read data
         case C_RCV: 
-            // printf("C_RCV->0x%x\n", byteRCV);
             if(byteRCV == BCC1(message.control, message.address)){
                 if(message.control == C_SET){llState = BCC1_OK; break;}
                 bcc2_input = 0;
@@ -482,6 +496,7 @@ int llread(unsigned char *packet)
             // if flag is received, last byte was BCC2 (end of frame)
             else if(byteRCV == FLAG){
                 llState = STOP;
+                break;
             }else{
                 packet[bytesReceived++] = byteRCV;
                 bcc2_input ^= byteRCV;
@@ -497,17 +512,16 @@ int llread(unsigned char *packet)
         case STOP:
             // overwrite bcc2 that was inputed with 0
             packet[bytesReceived--] = 0;
+
             // should be 0, because the bcc2_input was xor'd with bcc2
             if(bcc2_input == 0 && message.control == (frameNr << 7)){
                 // acknowledge frame
-                printf("Accepting frame!\n");
                 sendSupervisionMessage(A_TX, C_RR0 + ((message.control >> 7) ^ 0x1));
                 frameNr = frameNr ^ 0x1;
                 return bytesReceived;
             }
             else{
                 // reject frame
-                printf("Rejecting frame!\n");
                 sendSupervisionMessage(A_TX, C_REJ0 + (message.control >> 7));
                 memset(packet, 0, bytesReceived);
                 llState = START;
@@ -535,11 +549,16 @@ int llclose(int showStatistics)
     
     if(curLL.role == LlTx){
         // transmitter
+
+
         while(alarmCount <= retransmissions && llState != STOP){
 
             if(alarmEnabled == FALSE){
                 alarm(alarmTimeout);
-                sendSupervisionMessage(A_TX, C_DISC);
+                if(alarmCount > 0){
+                    nrRetransmissions++;
+                    sendSupervisionMessage(A_TX, C_DISC);
+                } 
                 alarmEnabled = TRUE;
             }
 
@@ -550,7 +569,6 @@ int llclose(int showStatistics)
             switch (llState)
             {
             case START:
-                printf("START: 0x%x\n", byteRCV);
                 memset(&received, 0, sizeof(Message));
                 if(byteRCV == FLAG){
                     llState = FLAG_RCV;
@@ -558,7 +576,6 @@ int llclose(int showStatistics)
                 }
                 break;
             case FLAG_RCV:
-                printf("FLAG_RCV: 0x%x\n", byteRCV);
                 if(byteRCV == FLAG)break;
                 else if(byteRCV == A_RX) {
                     llState = A_RCV;
@@ -568,7 +585,6 @@ int llclose(int showStatistics)
                 llState = START;
                 break;
             case A_RCV:
-                printf("A_RCV: 0x%x\n", byteRCV);
                 if(byteRCV == FLAG){llState = FLAG_RCV; break;}
                 else if(byteRCV == C_DISC){
                     llState = C_RCV;
@@ -578,7 +594,6 @@ int llclose(int showStatistics)
                 llState = START;
                 break;
             case C_RCV:
-                printf("C_RCV: 0x%x\n", byteRCV);
                 if(byteRCV == FLAG){llState = FLAG_RCV; break;}
                 else if(byteRCV == BCC1(received.control, received.address)){
                     llState = BCC1_OK;
@@ -589,7 +604,6 @@ int llclose(int showStatistics)
             case BCC1_OK:
                 if(byteRCV == FLAG){
                     // received correct DISC frame and send UA frame
-                    printf("RECEIVED DISC!\n");
                     sendSupervisionMessage(A_RX, C_UA);   
                     llState = STOP;
                     break;  
@@ -600,20 +614,22 @@ int llclose(int showStatistics)
             }
 
         }
-
-
         
     }
     else{
         // receiver
         // block alarm until i have sent a DISC frame
         alarmEnabled = TRUE;
+        sendSupervisionMessage(A_RX, C_DISC);
 
         while(alarmCount <= retransmissions && llState != STOP){
             // receive the DISC FRAME
             if(alarmEnabled == FALSE){
                 alarm(alarmTimeout);
-                sendSupervisionMessage(A_RX, C_DISC);
+                if(alarmCount > 0){
+                    sendSupervisionMessage(A_RX, C_DISC);
+                    nrRetransmissions++;
+                } 
                 alarmEnabled = TRUE;
             }
 
@@ -624,12 +640,10 @@ int llclose(int showStatistics)
             switch (llState)
             {
             case START:
-                printf("START: 0x%x\n", byteRCV);
                 memset(&received, 0, sizeof(Message));
                 if(byteRCV == FLAG){llState = FLAG_RCV;break;}
                 break;
             case FLAG_RCV:
-                printf("FLAG_RCV: 0x%x\n", byteRCV);
                 if(byteRCV == FLAG){break;}
                 // address could be tx (if it is DISC) or rx (if it is UA)
                 else if(byteRCV == A_TX || byteRCV == A_RX){
@@ -640,7 +654,6 @@ int llclose(int showStatistics)
                 llState = START;
                 break;
             case A_RCV:
-                printf("A_RCV: 0x%x\n", byteRCV);
                 if(byteRCV == FLAG){llState = FLAG_RCV;break;}
                 else if(byteRCV == C_DISC || byteRCV == C_UA){
                     received.control = byteRCV;
@@ -650,7 +663,6 @@ int llclose(int showStatistics)
                 llState = START;
                 break;
             case C_RCV:
-                printf("C_RCV: 0x%x\n", byteRCV); 
                 if(byteRCV == FLAG){llState = FLAG_RCV;break;}
                 else if(byteRCV == BCC1(received.control, received.address)){
                     llState = BCC1_OK;
@@ -660,15 +672,12 @@ int llclose(int showStatistics)
                 break;
             case BCC1_OK:
                 if(byteRCV == FLAG){
-            
                     if(received.control == C_UA){
                         llState = STOP;
-                        printf("GOT C_UA\n");
                         break;
                     }
                     if(received.control == C_DISC){
                         // send C_DISC
-                        printf("GOT C_DISC\n");
                         sendSupervisionMessage(A_RX, C_DISC);
                         alarmEnabled = FALSE;
                         llState = START;
@@ -689,9 +698,9 @@ int llclose(int showStatistics)
 
     if(showStatistics > 0){
         // print statistics
-        printf("# Frames: %d\n", 1);
-        printf("# Retransmissions: %d\n", 1);
-        printf("# Timeouts: %d\n", 1);
+        printf("# Frames: %d\n", nrFrames);
+        printf("# Retransmissions: %d\n", nrRetransmissions);
+        printf("# Timeouts: %d\n", nrTimeouts);
     }
     int clstat = closeSerialPort();
     return clstat;
